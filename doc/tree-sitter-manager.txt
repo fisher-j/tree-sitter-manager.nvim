@@ -322,8 +322,9 @@ languages.<lang>.install_info.queries ~
   Default: `nil`
 
   If unset, bundled `runtime/queries/<lang>/` will be symlinked to the
-  `query_dir` location. Otherwise, set it to the relative path of the queries
-  directory in the repository, often `"queries"`.
+  `query_dir` location when supported, or copied there on platforms such as
+  Windows where symlinks are commonly unavailable. Otherwise, set it to the
+  relative path of the queries directory in the repository, often `"queries"`.
 
 ==============================================================================
 9. HIGHLIGHTING                           *tree-sitter-manager-highlighting*

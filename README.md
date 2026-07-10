@@ -105,7 +105,8 @@ require("tree-sitter-manager").setup({
 
 ### `queries` behaviour
 If `queries` is unset or `nil` bundled `runtime/queries/<lang>/` will be
-symlinked to the `query_dir` location. Set it to the relative path of the
+symlinked to the `query_dir` location when supported, or copied there on
+platforms such as Windows where symlinks are commonly unavailable. Set it to the relative path of the
 queries directory in the repository, often `"queries"`, to use the shipped
 queries.
 
