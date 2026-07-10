@@ -15,8 +15,116 @@ local notify_icon
 ---@alias Lang string
 local M = { installing = {}, status = {} }
 
+local function is_windows()
+    return vim.uv.os_uname().sysname:match("Windows")
+end
+
+local function use_query_symlink()
+    return not is_windows()
+end
+
+local function symlink_failed_permissions(err)
+    if not err then
+        return false
+    end
+    err = tostring(err)
+    return err:match("EPERM") or err:match("operation not permitted")
+end
+
 function M.setup()
     notify_icon = config.cfg.nerdfont and notify_nerd or vim.fn["repeat"]({ "" }, 7)
+end
+
+local function command_parts(env_name, fallback)
+    local command = vim.env[env_name]
+    if command and command ~= "" then
+        return vim.split(command, " ", { trimempty = true })
+    end
+    return { fallback }
+end
+
+local function windows_build_commands(lang, build_path)
+    local src_dir = vim.fs.joinpath(build_path, "src")
+    local parser = vim.fs.joinpath(src_dir, "parser.c")
+    if not vim.uv.fs_stat(parser) then
+        return nil, "windows_build(" .. lang .. ")\n" .. parser .. " not found"
+    end
+
+    local obj_dir = vim.fs.joinpath(build_path, ".tsm-build")
+    vim.fn.mkdir(obj_dir, "p")
+
+    local objects = {}
+    local commands = {}
+
+    local function add_compile(env_name, fallback, source, output, extra)
+        table.insert(objects, output)
+        table.insert(
+            commands,
+            {
+                args = util.concat(
+                    command_parts(env_name, fallback),
+                    { "-Os", "-I" .. src_dir, "-c", source, "-o", output },
+                    extra or {}
+                ),
+                cwd = build_path,
+            }
+        )
+    end
+
+    add_compile("CC", "gcc", parser, vim.fs.joinpath(obj_dir, "parser.o"), { "-std=c11" })
+
+    local scanner_c = vim.fs.joinpath(src_dir, "scanner.c")
+    if vim.uv.fs_stat(scanner_c) then
+        add_compile("CC", "gcc", scanner_c, vim.fs.joinpath(obj_dir, "scanner.o"), { "-std=c11" })
+    end
+
+    local cxx_scanner
+    for _, name in ipairs({ "scanner.cc", "scanner.cpp", "scanner.cxx" }) do
+        local path = vim.fs.joinpath(src_dir, name)
+        if vim.uv.fs_stat(path) then
+            cxx_scanner = path
+            break
+        end
+    end
+
+    local linker_env = "CC"
+    local linker_fallback = "gcc"
+    if cxx_scanner then
+        add_compile("CXX", "g++", cxx_scanner, vim.fs.joinpath(obj_dir, "scanner.o"), { "-std=c++14" })
+        linker_env = "CXX"
+        linker_fallback = "g++"
+    end
+
+    table.insert(commands, {
+        args = util.concat(command_parts(linker_env, linker_fallback), { "-shared", "-o", util.ppath(lang) }, objects),
+        cwd = build_path,
+    })
+
+    return commands
+end
+
+local function run_windows_build(lang, build_path, status, callback)
+    local commands, err = windows_build_commands(lang, build_path)
+    if not commands then
+        callback({ ok = false, error = err })
+        return
+    end
+
+    local function step(i, out)
+        if i > #commands then
+            callback(out)
+            return
+        end
+        util.run_async(commands[i].args, commands[i].cwd, out, function(next)
+            step(i + 1, next)
+        end)
+    end
+
+    step(1, status)
+end
+
+local function run_unix_build(lang, build_path, status, callback)
+    util.run_async({ "tree-sitter", "build", "-o", util.ppath(lang) }, build_path, status, callback)
 end
 
 local function copy_queries(lang, source)
@@ -24,8 +132,16 @@ local function copy_queries(lang, source)
     if not source then
         source = vim.fs.joinpath(util.PLUGIN_ROOT, "runtime/queries", lang)
         vim.fs.rm(qpath, { recursive = true, force = true })
-        ok, err = vim.uv.fs_symlink(source, qpath, { dir = true })
-        return { ok = ok, error = err and "copy_queries(" .. lang .. ")\n" .. err }
+        if use_query_symlink() then
+            local ok, err = vim.uv.fs_symlink(source, qpath, { dir = true })
+            if ok then
+                return { ok = true }
+            end
+            if not symlink_failed_permissions(err) then
+                return { ok = false, error = err and "copy_queries(" .. lang .. ")\n" .. err }
+            end
+        end
+        return util.copy_dir(source, qpath)
     elseif vim.uv.fs_stat(source) then
         return util.copy_dir(source, qpath)
     else
@@ -43,7 +159,8 @@ local function treesitter_build(lang, query_dir, build_path, generate, tmpdir, s
         if out.ok then
             vim.notify(notify_icon[7] .. "Building " .. lang)
         end
-        util.run_async({ "tree-sitter", "build", "-o", util.ppath(lang) }, build_path, out, function(out)
+        local build = is_windows() and run_windows_build or run_unix_build
+        build(lang, build_path, out, function(out)
             if out.ok then
                 out = copy_queries(lang, query_dir and vim.fs.joinpath(build_path, query_dir))
             end
